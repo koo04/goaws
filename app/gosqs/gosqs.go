@@ -10,7 +10,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	
+
 	"github.com/gorilla/mux"
 	"github.com/p4tin/goaws/app"
 	"github.com/p4tin/goaws/app/common"
@@ -335,6 +335,11 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 func ReceiveMessage(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/xml")
 
+	visibilityTimeoutSeconds := 0
+	vts := req.FormValue("VisibilityTimeout")
+	if vts != "" {
+		visibilityTimeoutSeconds, _ = strconv.Atoi(vts)
+	}
 	waitTimeSeconds := 0
 	wts := req.FormValue("WaitTimeSeconds")
 	if wts != "" {
@@ -421,7 +426,11 @@ func ReceiveMessage(w http.ResponseWriter, req *http.Request) {
 			}
 			msg.ReceiptHandle = msg.Uuid + "#" + uuid
 			msg.ReceiptTime = time.Now().UTC()
-			msg.VisibilityTimeout = time.Now().Add(time.Duration(app.SyncQueues.Queues[queueName].TimeoutSecs) * time.Second)
+
+			if visibilityTimeoutSeconds == 0 {
+				visibilityTimeoutSeconds = app.SyncQueues.Queues[queueName].TimeoutSecs
+			}
+			msg.VisibilityTimeout = time.Now().Add(time.Duration(visibilityTimeoutSeconds) * time.Second)
 
 			if app.SyncQueues.Queues[queueName].IsFIFO {
 				// If we got messages here it means we have not processed it yet, so get next
