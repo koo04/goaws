@@ -8,9 +8,9 @@ import (
 
 	"fmt"
 
+	sns "github.com/Admiral-Piett/goaws/app/gosns"
+	sqs "github.com/Admiral-Piett/goaws/app/gosqs"
 	"github.com/gorilla/mux"
-	sns "github.com/p4tin/goaws/app/gosns"
-	sqs "github.com/p4tin/goaws/app/gosqs"
 )
 
 // New returns a new router
@@ -48,13 +48,15 @@ var routingTable = map[string]http.HandlerFunc{
 	"CreateTopic":               sns.CreateTopic,
 	"DeleteTopic":               sns.DeleteTopic,
 	"Subscribe":                 sns.Subscribe,
-	"ConfirmSubscription":       sns.ConfirmSubscription,
 	"SetSubscriptionAttributes": sns.SetSubscriptionAttributes,
 	"GetSubscriptionAttributes": sns.GetSubscriptionAttributes,
 	"ListSubscriptionsByTopic":  sns.ListSubscriptionsByTopic,
 	"ListSubscriptions":         sns.ListSubscriptions,
 	"Unsubscribe":               sns.Unsubscribe,
 	"Publish":                   sns.Publish,
+
+	// SNS Internal
+	"ConfirmSubscription": sns.ConfirmSubscription,
 }
 
 func health(w http.ResponseWriter, req *http.Request) {

@@ -11,9 +11,9 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/Admiral-Piett/goaws/app"
+	"github.com/Admiral-Piett/goaws/app/common"
 	"github.com/gorilla/mux"
-	"github.com/p4tin/goaws/app"
-	"github.com/p4tin/goaws/app/common"
 )
 
 func init() {
@@ -38,6 +38,8 @@ func init() {
 	app.SqsErrors["InvalidVisibilityTimeout"] = err8
 	err9 := app.SqsErrorType{HttpError: http.StatusBadRequest, Type: "MessageNotInFlight", Code: "AWS.SimpleQueueService.MessageNotInFlight", Message: "The message referred to isn't in flight."}
 	app.SqsErrors["MessageNotInFlight"] = err9
+	err10 := app.SqsErrorType{HttpError: http.StatusBadRequest, Type: "MessageTooBig", Code: "InvalidMessageContents", Message: "The message size exceeds the limit."}
+	app.SqsErrors["MessageTooBig"] = err10
 	app.SqsErrors[ErrInvalidParameterValue.Type] = *ErrInvalidParameterValue
 	app.SqsErrors[ErrInvalidAttributeValue.Type] = *ErrInvalidAttributeValue
 }
@@ -54,6 +56,15 @@ func PeriodicTasks(d time.Duration, quit <-chan struct{}) {
 				log.Debugf("Queue [%s] length [%d]", queue.Name, len(queue.Messages))
 				for i := 0; i < len(queue.Messages); i++ {
 					msg := &queue.Messages[i]
+
+					// Reset deduplication period
+					for dedupId, startTime := range queue.Duplicates {
+						if time.Now().After(startTime.Add(app.DeduplicationPeriod)) {
+							log.Debugf("deduplication period for message with deduplicationId [%s] expired", dedupId)
+							delete(queue.Duplicates, dedupId)
+						}
+					}
+
 					if msg.ReceiptHandle != "" {
 						if msg.VisibilityTimeout.Before(time.Now()) {
 							log.Debugf("Making message visible again %s", msg.ReceiptHandle)
@@ -123,7 +134,10 @@ func CreateQueue(w http.ResponseWriter, req *http.Request) {
 			Arn:                 queueArn,
 			TimeoutSecs:         app.CurrentEnvironment.QueueAttributeDefaults.VisibilityTimeout,
 			ReceiveWaitTimeSecs: app.CurrentEnvironment.QueueAttributeDefaults.ReceiveMessageWaitTimeSeconds,
+			MaximumMessageSize:  app.CurrentEnvironment.QueueAttributeDefaults.MaximumMessageSize,
 			IsFIFO:              app.HasFIFOQueueName(queueName),
+			EnableDuplicates:    app.CurrentEnvironment.EnableDuplicates,
+			Duplicates:          make(map[string]time.Time),
 		}
 		if err := validateAndSetQueueAttributes(queue, req.Form); err != nil {
 			createErrorResponse(w, req, err.Error())
@@ -144,8 +158,10 @@ func CreateQueue(w http.ResponseWriter, req *http.Request) {
 
 func SendMessage(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/xml")
+	req.ParseForm()
 	messageBody := req.FormValue("MessageBody")
 	messageGroupID := req.FormValue("MessageGroupId")
+	messageDeduplicationID := req.FormValue("MessageDeduplicationId")
 	messageAttributes := extractMessageAttributes(req, "")
 
 	queueUrl := getQueueFromPath(req.FormValue("QueueUrl"), req.URL.String())
@@ -165,6 +181,18 @@ func SendMessage(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if app.SyncQueues.Queues[queueName].MaximumMessageSize > 0 &&
+		len(messageBody) > app.SyncQueues.Queues[queueName].MaximumMessageSize {
+		// Message size is too big
+		createErrorResponse(w, req, "MessageTooBig")
+		return
+	}
+
+	delaySecs := app.SyncQueues.Queues[queueName].DelaySecs
+	if mv := req.FormValue("DelaySeconds"); mv != "" {
+		delaySecs, _ = strconv.Atoi(mv)
+	}
+
 	log.Println("Putting Message in Queue:", queueName)
 	msg := app.Message{MessageBody: []byte(messageBody)}
 	if len(messageAttributes) > 0 {
@@ -174,14 +202,23 @@ func SendMessage(w http.ResponseWriter, req *http.Request) {
 	msg.MD5OfMessageBody = common.GetMD5Hash(messageBody)
 	msg.Uuid, _ = common.NewUUID()
 	msg.GroupID = messageGroupID
+	msg.DeduplicationID = messageDeduplicationID
 	msg.SentTime = time.Now()
+	msg.DelaySecs = delaySecs
 
 	app.SyncQueues.Lock()
 	fifoSeqNumber := ""
 	if app.SyncQueues.Queues[queueName].IsFIFO {
 		fifoSeqNumber = app.SyncQueues.Queues[queueName].NextSequenceNumber(messageGroupID)
 	}
-	app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages, msg)
+
+	if !app.SyncQueues.Queues[queueName].IsDuplicate(messageDeduplicationID) {
+		app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages, msg)
+	} else {
+		log.Debugf("Message with deduplicationId [%s] in queue [%s] is duplicate ", messageDeduplicationID, queueName)
+	}
+
+	app.SyncQueues.Queues[queueName].InitDuplicatation(messageDeduplicationID)
 	app.SyncQueues.Unlock()
 	log.Infof("%s: Queue: %s, Message: %s\n", time.Now().Format("2006-01-02 15:04:05"), queueName, msg.MessageBody)
 
@@ -242,7 +279,6 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			keyIndex, err := strconv.Atoi(keySegments[1])
-
 			if err != nil {
 				createErrorResponse(w, req, "Error")
 				return
@@ -266,8 +302,8 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 				sendEntries[keyIndex-1].MessageGroupId = v[0]
 			}
 
-			if keySegments[2] == "MessageAttribute" {
-				sendEntries[keyIndex-1].MessageAttributes = extractMessageAttributes(req, strings.Join(keySegments[0:2], "."))
+			if keySegments[2] == "MessageDeduplicationId" {
+				sendEntries[keyIndex-1].MessageDeduplicationId = v[0]
 			}
 		}
 	}
@@ -300,6 +336,7 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 		}
 		msg.MD5OfMessageBody = common.GetMD5Hash(sendEntry.MessageBody)
 		msg.GroupID = sendEntry.MessageGroupId
+		msg.DeduplicationID = sendEntry.MessageDeduplicationId
 		msg.Uuid, _ = common.NewUUID()
 		msg.SentTime = time.Now()
 		app.SyncQueues.Lock()
@@ -307,7 +344,15 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 		if app.SyncQueues.Queues[queueName].IsFIFO {
 			fifoSeqNumber = app.SyncQueues.Queues[queueName].NextSequenceNumber(sendEntry.MessageGroupId)
 		}
-		app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages, msg)
+
+		if !app.SyncQueues.Queues[queueName].IsDuplicate(sendEntry.MessageDeduplicationId) {
+			app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages, msg)
+		} else {
+			log.Debugf("Message with deduplicationId [%s] in queue [%s] is duplicate ", sendEntry.MessageDeduplicationId, queueName)
+		}
+
+		app.SyncQueues.Queues[queueName].InitDuplicatation(sendEntry.MessageDeduplicationId)
+
 		app.SyncQueues.Unlock()
 		se := app.SendMessageBatchResultEntry{
 			Id:                     sendEntry.Id,
@@ -334,6 +379,7 @@ func SendMessageBatch(w http.ResponseWriter, req *http.Request) {
 
 func ReceiveMessage(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/xml")
+	req.ParseForm()
 
 	visibilityTimeoutSeconds := 0
 	vts := req.FormValue("VisibilityTimeout")
@@ -470,8 +516,8 @@ func ReceiveMessage(w http.ResponseWriter, req *http.Request) {
 
 func numberOfHiddenMessagesInQueue(queue app.Queue) int {
 	num := 0
-	for i := range queue.Messages {
-		if queue.Messages[i].ReceiptHandle != "" {
+	for _, m := range queue.Messages {
+		if m.ReceiptHandle != "" || m.DelaySecs > 0 && time.Now().Before(m.SentTime.Add(time.Duration(m.DelaySecs)*time.Second)) {
 			num++
 		}
 	}
@@ -578,7 +624,6 @@ func DeleteMessageBatch(w http.ResponseWriter, req *http.Request) {
 		keySegments := strings.Split(k, ".")
 		if keySegments[0] == "DeleteMessageBatchRequestEntry" {
 			keyIndex, err := strconv.Atoi(keySegments[1])
-
 			if err != nil {
 				createErrorResponse(w, req, "Error")
 				return
@@ -611,6 +656,7 @@ func DeleteMessageBatch(w http.ResponseWriter, req *http.Request) {
 					log.Printf("FIFO Queue %s unlocking group %s:", queueName, msg.GroupID)
 					app.SyncQueues.Queues[queueName].UnlockGroup(msg.GroupID)
 					app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages[:i], app.SyncQueues.Queues[queueName].Messages[i+1:]...)
+					delete(app.SyncQueues.Queues[queueName].Duplicates, msg.DeduplicationID)
 
 					deleteEntry.Deleted = true
 					deletedEntry := app.DeleteMessageBatchResultEntry{Id: deleteEntry.Id}
@@ -675,6 +721,7 @@ func DeleteMessage(w http.ResponseWriter, req *http.Request) {
 				app.SyncQueues.Queues[queueName].UnlockGroup(msg.GroupID)
 				//Delete message from Q
 				app.SyncQueues.Queues[queueName].Messages = append(app.SyncQueues.Queues[queueName].Messages[:i], app.SyncQueues.Queues[queueName].Messages[i+1:]...)
+				delete(app.SyncQueues.Queues[queueName].Duplicates, msg.DeduplicationID)
 
 				app.SyncQueues.Unlock()
 				// Create, encode/xml and send response
@@ -740,6 +787,7 @@ func PurgeQueue(w http.ResponseWriter, req *http.Request) {
 	app.SyncQueues.Lock()
 	if _, ok := app.SyncQueues.Queues[queueName]; ok {
 		app.SyncQueues.Queues[queueName].Messages = nil
+		app.SyncQueues.Queues[queueName].Duplicates = make(map[string]time.Time)
 		respStruct := app.PurgeQueueResponse{"http://queue.amazonaws.com/doc/2012-11-05/", app.ResponseMetadata{RequestId: "00000000-0000-0000-0000-000000000000"}}
 		enc := xml.NewEncoder(w)
 		enc.Indent("  ", "    ")
@@ -783,6 +831,27 @@ func GetQueueAttributes(w http.ResponseWriter, req *http.Request) {
 	// Retrieve FormValues required
 	queueUrl := getQueueFromPath(req.FormValue("QueueUrl"), req.URL.String())
 
+	attribute_names := map[string]bool{}
+
+	for field, value := range req.Form {
+		if strings.HasPrefix(field, "AttributeName.") {
+			attribute_names[value[0]] = true
+		}
+	}
+
+	include_attr := func(a string) bool {
+		if len(attribute_names) == 0 {
+			return true
+		}
+		if _, ok := attribute_names[a]; ok {
+			return true
+		}
+		if _, ok := attribute_names["All"]; ok {
+			return true
+		}
+		return false
+	}
+
 	queueName := ""
 	if queueUrl == "" {
 		vars := mux.Vars(req)
@@ -797,31 +866,47 @@ func GetQueueAttributes(w http.ResponseWriter, req *http.Request) {
 	if queue, ok := app.SyncQueues.Queues[queueName]; ok {
 		// Create, encode/xml and send response
 		attribs := make([]app.Attribute, 0, 0)
-		attr := app.Attribute{Name: "VisibilityTimeout", Value: strconv.Itoa(queue.TimeoutSecs)}
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "DelaySeconds", Value: "0"}
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "ReceiveMessageWaitTimeSeconds", Value: strconv.Itoa(queue.ReceiveWaitTimeSecs)}
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "ApproximateNumberOfMessages", Value: strconv.Itoa(len(queue.Messages))}
-		attribs = append(attribs, attr)
-		app.SyncQueues.RLock()
-		attr = app.Attribute{Name: "ApproximateNumberOfMessagesNotVisible", Value: strconv.Itoa(numberOfHiddenMessagesInQueue(*queue))}
-		app.SyncQueues.RUnlock()
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "CreatedTimestamp", Value: "0000000000"}
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "LastModifiedTimestamp", Value: "0000000000"}
-		attribs = append(attribs, attr)
-		attr = app.Attribute{Name: "QueueArn", Value: queue.Arn}
-		attribs = append(attribs, attr)
+		if include_attr("VisibilityTimeout") {
+			attr := app.Attribute{Name: "VisibilityTimeout", Value: strconv.Itoa(queue.TimeoutSecs)}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("DelaySeconds") {
+			attr := app.Attribute{Name: "DelaySeconds", Value: strconv.Itoa(queue.DelaySecs)}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("ReceiveMessageWaitTimeSeconds") {
+			attr := app.Attribute{Name: "ReceiveMessageWaitTimeSeconds", Value: strconv.Itoa(queue.ReceiveWaitTimeSecs)}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("ApproximateNumberOfMessages") {
+			attr := app.Attribute{Name: "ApproximateNumberOfMessages", Value: strconv.Itoa(len(queue.Messages))}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("ApproximateNumberOfMessagesNotVisible") {
+			attr := app.Attribute{Name: "ApproximateNumberOfMessagesNotVisible", Value: strconv.Itoa(numberOfHiddenMessagesInQueue(*queue))}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("CreatedTimestamp") {
+			attr := app.Attribute{Name: "CreatedTimestamp", Value: "0000000000"}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("LastModifiedTimestamp") {
+			attr := app.Attribute{Name: "LastModifiedTimestamp", Value: "0000000000"}
+			attribs = append(attribs, attr)
+		}
+		if include_attr("QueueArn") {
+			attr := app.Attribute{Name: "QueueArn", Value: queue.Arn}
+			attribs = append(attribs, attr)
+		}
 
 		deadLetterTargetArn := ""
 		if queue.DeadLetterQueue != nil {
 			deadLetterTargetArn = queue.DeadLetterQueue.Name
 		}
-		attr = app.Attribute{Name: "RedrivePolicy", Value: fmt.Sprintf(`{"maxReceiveCount": "%d", "deadLetterTargetArn":"%s"}`, queue.MaxReceiveCount, deadLetterTargetArn)}
-		attribs = append(attribs, attr)
+		if include_attr("RedrivePolicy") {
+			attr := app.Attribute{Name: "RedrivePolicy", Value: fmt.Sprintf(`{"maxReceiveCount": "%d", "deadLetterTargetArn":"%s"}`, queue.MaxReceiveCount, deadLetterTargetArn)}
+			attribs = append(attribs, attr)
+		}
 
 		result := app.GetQueueAttributesResult{Attrs: attribs}
 		respStruct := app.GetQueueAttributesResponse{"http://queue.amazonaws.com/doc/2012-11-05/", result, app.ResponseMetadata{RequestId: "00000000-0000-0000-0000-000000000000"}}

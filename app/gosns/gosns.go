@@ -22,8 +22,8 @@ import (
 	"io/ioutil"
 	"math/big"
 
-	"github.com/p4tin/goaws/app"
-	"github.com/p4tin/goaws/app/common"
+	"github.com/Admiral-Piett/goaws/app"
+	"github.com/Admiral-Piett/goaws/app/common"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -306,7 +306,7 @@ func ListSubscriptions(w http.ResponseWriter, req *http.Request) {
 	for _, topic := range app.SyncTopics.Topics {
 		for _, sub := range topic.Subscriptions {
 			tar := app.TopicMemberResult{TopicArn: topic.Arn, Protocol: sub.Protocol,
-				SubscriptionArn: sub.SubscriptionArn, Endpoint: sub.EndPoint}
+				SubscriptionArn: sub.SubscriptionArn, Endpoint: sub.EndPoint, Owner: app.CurrentEnvironment.AccountID}
 			respStruct.Result.Subscriptions.Member = append(respStruct.Result.Subscriptions.Member, tar)
 		}
 	}
@@ -330,7 +330,7 @@ func ListSubscriptionsByTopic(w http.ResponseWriter, req *http.Request) {
 
 		for _, sub := range topic.Subscriptions {
 			tar := app.TopicMemberResult{TopicArn: topic.Arn, Protocol: sub.Protocol,
-				SubscriptionArn: sub.SubscriptionArn, Endpoint: sub.EndPoint}
+				SubscriptionArn: sub.SubscriptionArn, Endpoint: sub.EndPoint, Owner: app.CurrentEnvironment.AccountID}
 			respStruct.Result.Subscriptions.Member = append(respStruct.Result.Subscriptions.Member, tar)
 		}
 		SendResponseBack(w, req, respStruct, content)
@@ -553,7 +553,12 @@ func publishSQS(w http.ResponseWriter, req *http.Request,
 		} else {
 			msg.MessageAttributes = messageAttributes
 			msg.MD5OfMessageAttributes = common.HashAttributes(messageAttributes)
-			msg.MessageBody = []byte(messageBody)
+			m, err := extractMessageFromJSON(messageBody, subs.Protocol)
+			if err == nil {
+				msg.MessageBody = []byte(m)
+			} else {
+				msg.MessageBody = []byte(messageBody)
+			}
 		}
 
 		msg.MD5OfMessageBody = common.GetMD5Hash(messageBody)
@@ -604,7 +609,7 @@ func formatAttributes(values map[string]app.MessageAttributeValue) map[string]ap
 	attr := make(map[string]app.MsgAttr)
 	for k, v := range values {
 		attr[k] = app.MsgAttr{
-			Type:  v.ValueKey,
+			Type:  v.DataType,
 			Value: v.Value,
 		}
 	}
@@ -646,14 +651,19 @@ func callEndpoint(endpoint string, subArn string, msg app.SNSMessage, raw bool) 
 	if res == nil {
 		return errors.New("response is nil")
 	}
-	if res.StatusCode%200 != 0 {
+
+	//Amazon considers a Notification delivery attempt successful if the endpoint
+	//responds in the range of 200-499. Response codes outside that range will
+	//trigger the Subscription's retry policy.
+	//https://docs.aws.amazon.com/sns/latest/dg/SendMessageToHttp.prepare.html
+	if res.StatusCode < 200 || res.StatusCode > 499 {
 		log.WithFields(log.Fields{
 			"statusCode": res.StatusCode,
 			"status":     res.Status,
 			"header":     res.Header,
 			"endpoint":   endpoint,
-		}).Error("Not 2xx repsone")
-		return errors.New("Not 2xx response")
+		}).Error("Response outside of acceptable (200-499) range")
+		return errors.New("Response outside of acceptable (200-499) range")
 	}
 
 	defer res.Body.Close()

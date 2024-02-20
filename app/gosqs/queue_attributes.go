@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/p4tin/goaws/app"
+	"github.com/Admiral-Piett/goaws/app"
 )
 
 var (
@@ -28,7 +28,7 @@ var (
 
 // validateAndSetQueueAttributes applies the requested queue attributes to the given
 // queue.
-// TODO Currently it only supports VisibilityTimeout, RedrivePolicy and ReceiveMessageWaitTimeSeconds  attributes.
+// TODO Currently it only supports VisibilityTimeout, MaximumMessageSize, DelaySeconds, RedrivePolicy and ReceiveMessageWaitTimeSeconds  attributes.
 func validateAndSetQueueAttributes(q *app.Queue, u url.Values) error {
 	attr := extractQueueAttributes(u)
 	visibilityTimeout, _ := strconv.Atoi(attr["VisibilityTimeout"])
@@ -38,6 +38,10 @@ func validateAndSetQueueAttributes(q *app.Queue, u url.Values) error {
 	receiveWaitTime, _ := strconv.Atoi(attr["ReceiveMessageWaitTimeSeconds"])
 	if receiveWaitTime != 0 {
 		q.ReceiveWaitTimeSecs = receiveWaitTime
+	}
+	maximumMessageSize, _ := strconv.Atoi(attr["MaximumMessageSize"])
+	if maximumMessageSize != 0 {
+		q.MaximumMessageSize = maximumMessageSize
 	}
 	strRedrivePolicy := attr["RedrivePolicy"]
 	if strRedrivePolicy != "" {
@@ -73,6 +77,10 @@ func validateAndSetQueueAttributes(q *app.Queue, u url.Values) error {
 		}
 		q.DeadLetterQueue = deadLetterQueue
 		q.MaxReceiveCount = maxReceiveCount
+	}
+	delaySecs, _ := strconv.Atoi(attr["DelaySeconds"])
+	if delaySecs != 0 {
+		q.DelaySecs = delaySecs
 	}
 
 	return nil

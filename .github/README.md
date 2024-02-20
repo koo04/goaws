@@ -1,7 +1,7 @@
 # GoAws
 [![Build Status](https://travis-ci.org/p4tin/goaws.svg?branch=master)](https://travis-ci.org/p4tin/goaws)
 
-You are always welcome to [tweet me](https://twitter.com/gocodecloud) or [buy me a coffee](https://www.paypal.me/p4tin)
+You are always welcome to [tweet the creator in chief](https://twitter.com/gocodecloud) or [buy him a coffee](https://www.paypal.me/p4tin)
 
 Written in Go this is a clone of the AWS SQS/SNS systems.  This system is designed to emulate SQS and SNS in a local environment so developers can test their interfaces without having to connect to the AWS Cloud and possibly incurring the expense, or even worse actually write to production topics/queues by mistake.  If you see any problems or would like to see a new feature, please open an issue here in github.  As well, I will logon to Gitter so we can discuss your deployment issues or the weather.
 
@@ -14,7 +14,7 @@ All SNS/SQS APIs have been implemented except:
 Here is a list of the APIs:
  - [x] ListQueues
  - [x] CreateQueue
- - [x] GetQueueAttributes (Always returns all attributes - unsupporterd arttributes are mocked)
+ - [x] GetQueueAttributes (unsupported attributes are mocked)
  - [x] GetQueueUrl
  - [x] SendMessage
  - [x] SendMessageBatch
@@ -65,13 +65,23 @@ Here is a list of the APIs:
  - [x] a command line argument to determine the environment to use in the config file (e.e.: Dev)
  - [x] IN the config file you can create Queues, Topic and Subscription see the example config file in the conf directory
 
+### Example: Passing Configuration to Docker
+```shell
+docker run \
+ --rm \
+ --name=goaws \
+ -v /path/on/host/goaws-config.yaml:/path/in/container/goaws-config.yaml \
+ -p=4100:4100 \
+ admiralpiett/goaws:v0.4.4-arm64 -config /path/in/container/goaws-config.yaml
+```
+
 ## Debug logging can be turned on via a command line flag (e.g.: -debug)
 
 ## Note:  The system does not authenticate or presently use https
 
 # Installation
 
-    go get github.com/p4tin/goaws/...
+    git clone git@github.com:Admiral-Piett/goaws.git
 
 ## Build and Run (Standalone)
 
@@ -85,19 +95,25 @@ Here is a list of the APIs:
 
 ## Run (Docker Version)
 
-    Get it
+    Version >= v0.3.2
+        docker pull admiralpiett/goaws
+
+    Version <= v0.3.1
         docker pull pafortin/goaws
 
     run
-        docker run -d --name goaws -p 4100:4100 pafortin/goaws
+        docker run -d --name goaws -p 4100:4100 admiralpiett/goaws
 
 
 
 ## Testing your installation
 
+### Postman Environment: [LINK](..%2Fpostman%2FGoAWS%20Local.postman_environment.json)
+### Postman Collection: [LINK](https://api.postman.com/collections/4714469-2b32c9da-aad4-4e9e-baee-6c11be6798a3?access_key=PMAT-01HG1KVFDXGGKH62KT141MBC0Z)
+
 You can test that your installation is working correctly in one of two ways:
 
- 1.  Usign the postman collection, use this [link to import it](https://www.getpostman.com/collections/091386eae8c70588348e).  As well the Environment variable for the collection should be set as follows:  URL = http://localhost:4100/.
+ 1.  Using the postman collection, use this [link to import it](https://api.postman.com/collections/4714469-2b32c9da-aad4-4e9e-baee-6c11be6798a3?access_key=PMAT-01HG1KVFDXGGKH62KT141MBC0Z).  As well the Environment variable for the collection should be set as follows:  URL = http://localhost:4100/.
 
  2. by using the AWS cli tools ([download link](http://docs.aws.amazon.com/cli/latest/userguide/installing.html)) here are some samples, you can refer to the [aws cli tools docs](http://docs.aws.amazon.com/cli/latest/reference/) for further information.
 
