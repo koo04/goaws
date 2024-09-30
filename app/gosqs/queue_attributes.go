@@ -1,105 +1,49 @@
 package gosqs
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
+
+	"github.com/Admiral-Piett/goaws/app/models"
 
 	"github.com/Admiral-Piett/goaws/app"
 )
 
-var (
-	ErrInvalidParameterValue = &app.SqsErrorType{
-		HttpError: http.StatusBadRequest,
-		Type:      "InvalidParameterValue",
-		Code:      "AWS.SimpleQueueService.InvalidParameterValue",
-		Message:   "An invalid or out-of-range value was supplied for the input parameter.",
+// TODO - Support:
+//   - attr.MessageRetentionPeriod
+//   - attr.Policy
+//   - attr.RedriveAllowPolicy
+func setQueueAttributesV1(q *app.Queue, attr models.QueueAttributes) error {
+	// FIXME - are there better places to put these bottom-limit validations?
+	if attr.DelaySeconds >= 0 {
+		q.DelaySeconds = attr.DelaySeconds.Int()
 	}
-	ErrInvalidAttributeValue = &app.SqsErrorType{
-		HttpError: http.StatusBadRequest,
-		Type:      "InvalidAttributeValue",
-		Code:      "AWS.SimpleQueueService.InvalidAttributeValue",
-		Message:   "Invalid Value for the parameter RedrivePolicy.",
+	if attr.MaximumMessageSize >= 0 {
+		q.MaximumMessageSize = attr.MaximumMessageSize.Int()
 	}
-)
-
-// validateAndSetQueueAttributes applies the requested queue attributes to the given
-// queue.
-// TODO Currently it only supports VisibilityTimeout, MaximumMessageSize, DelaySeconds, RedrivePolicy and ReceiveMessageWaitTimeSeconds  attributes.
-func validateAndSetQueueAttributes(q *app.Queue, u url.Values) error {
-	attr := extractQueueAttributes(u)
-	visibilityTimeout, _ := strconv.Atoi(attr["VisibilityTimeout"])
-	if visibilityTimeout != 0 {
-		q.TimeoutSecs = visibilityTimeout
+	// TODO - bottom limit should be the AWS limits
+	// The following 2 don't support zero values
+	if attr.MessageRetentionPeriod > 0 {
+		q.MessageRetentionPeriod = attr.MessageRetentionPeriod.Int()
 	}
-	receiveWaitTime, _ := strconv.Atoi(attr["ReceiveMessageWaitTimeSeconds"])
-	if receiveWaitTime != 0 {
-		q.ReceiveWaitTimeSecs = receiveWaitTime
+	if attr.ReceiveMessageWaitTimeSeconds > 0 {
+		q.ReceiveMessageWaitTimeSeconds = attr.ReceiveMessageWaitTimeSeconds.Int()
 	}
-	maximumMessageSize, _ := strconv.Atoi(attr["MaximumMessageSize"])
-	if maximumMessageSize != 0 {
-		q.MaximumMessageSize = maximumMessageSize
+	if attr.VisibilityTimeout >= 0 {
+		q.VisibilityTimeout = attr.VisibilityTimeout.Int()
 	}
-	strRedrivePolicy := attr["RedrivePolicy"]
-	if strRedrivePolicy != "" {
-		// support both int and string maxReceiveCount (Amazon clients use string)
-		redrivePolicy1 := struct {
-			MaxReceiveCount     int    `json:"maxReceiveCount"`
-			DeadLetterTargetArn string `json:"deadLetterTargetArn"`
-		}{}
-		redrivePolicy2 := struct {
-			MaxReceiveCount     string `json:"maxReceiveCount"`
-			DeadLetterTargetArn string `json:"deadLetterTargetArn"`
-		}{}
-		err1 := json.Unmarshal([]byte(strRedrivePolicy), &redrivePolicy1)
-		err2 := json.Unmarshal([]byte(strRedrivePolicy), &redrivePolicy2)
-		maxReceiveCount := redrivePolicy1.MaxReceiveCount
-		deadLetterQueueArn := redrivePolicy1.DeadLetterTargetArn
-		if err1 != nil && err2 != nil {
-			return ErrInvalidAttributeValue
-		} else if err1 != nil {
-			maxReceiveCount, _ = strconv.Atoi(redrivePolicy2.MaxReceiveCount)
-			deadLetterQueueArn = redrivePolicy2.DeadLetterTargetArn
-		}
-
-		if (deadLetterQueueArn != "" && maxReceiveCount == 0) ||
-			(deadLetterQueueArn == "" && maxReceiveCount != 0) {
-			return ErrInvalidParameterValue
-		}
-		dlt := strings.Split(deadLetterQueueArn, ":")
-		deadLetterQueueName := dlt[len(dlt)-1]
-		deadLetterQueue, ok := app.SyncQueues.Queues[deadLetterQueueName]
+	if attr.RedrivePolicy != (models.RedrivePolicy{}) {
+		arnArray := strings.Split(attr.RedrivePolicy.DeadLetterTargetArn, ":")
+		queueName := arnArray[len(arnArray)-1]
+		deadLetterQueue, ok := app.SyncQueues.Queues[queueName]
 		if !ok {
-			return ErrInvalidParameterValue
+			log.Error("Invalid RedrivePolicy Attribute")
+			return fmt.Errorf("InvalidAttributeValue")
 		}
 		q.DeadLetterQueue = deadLetterQueue
-		q.MaxReceiveCount = maxReceiveCount
+		q.MaxReceiveCount = attr.RedrivePolicy.MaxReceiveCount.Int()
 	}
-	delaySecs, _ := strconv.Atoi(attr["DelaySeconds"])
-	if delaySecs != 0 {
-		q.DelaySecs = delaySecs
-	}
-
 	return nil
-}
-
-func extractQueueAttributes(u url.Values) map[string]string {
-	attr := map[string]string{}
-	for i := 1; true; i++ {
-		nameKey := fmt.Sprintf("Attribute.%d.Name", i)
-		attrName := u.Get(nameKey)
-		if attrName == "" {
-			break
-		}
-
-		valueKey := fmt.Sprintf("Attribute.%d.Value", i)
-		attrValue := u.Get(valueKey)
-		if attrValue != "" {
-			attr[attrName] = attrValue
-		}
-	}
-	return attr
 }

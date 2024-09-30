@@ -12,19 +12,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type SqsErrorType struct {
-	HttpError int
-	Type      string
-	Code      string
-	Message   string
-}
-
-func (s *SqsErrorType) Error() string {
-	return s.Type
-}
-
-var SqsErrors map[string]SqsErrorType
-
 type Message struct {
 	MessageBody            []byte
 	Uuid                   string
@@ -78,22 +65,24 @@ type MessageAttributeValue struct {
 	ValueKey string
 }
 
+// TODO - put all this in the models package
 type Queue struct {
-	Name                string
-	URL                 string
-	Arn                 string
-	TimeoutSecs         int
-	ReceiveWaitTimeSecs int
-	DelaySecs           int
-	MaximumMessageSize  int
-	Messages            []Message
-	DeadLetterQueue     *Queue
-	MaxReceiveCount     int
-	IsFIFO              bool
-	FIFOMessages        map[string]int
-	FIFOSequenceNumbers map[string]int
-	EnableDuplicates    bool
-	Duplicates          map[string]time.Time
+	Name                          string
+	URL                           string
+	Arn                           string
+	VisibilityTimeout             int // seconds
+	ReceiveMessageWaitTimeSeconds int
+	DelaySeconds                  int
+	MaximumMessageSize            int
+	MessageRetentionPeriod        int // seconds  // TODO - not used in the code yet
+	Messages                      []Message
+	DeadLetterQueue               *Queue
+	MaxReceiveCount               int
+	IsFIFO                        bool
+	FIFOMessages                  map[string]int
+	FIFOSequenceNumbers           map[string]int
+	EnableDuplicates              bool
+	Duplicates                    map[string]time.Time
 }
 
 var SyncQueues = struct {
